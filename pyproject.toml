@@ -1,0 +1,33 @@
+[project]
+name = "poe-rl"
+version = "0.1.0"
+description = "Reinforcement Learning for Path of Exile 2 Crafting"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.31.0",
+    "numpy>=1.24",
+    "gymnasium>=0.29.1",
+    "torch>=2.1",
+    "stable-baselines3>=2.3.0",
+    "sb3-contrib>=2.3.0",
+    "tensorboard>=2.17.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.4.0",
+    "mypy>=1.8.0",
+    "ruff>=0.1.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.mypy]
+strict = true
