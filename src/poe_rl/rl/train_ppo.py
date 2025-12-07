@@ -20,6 +20,7 @@ from ..data.models import ItemBase
 from ..engine.core import CraftingEngine
 from ..engine.database import CraftingDatabase
 from ..rl.envs.ring_crafting_env import (
+    GoalSpec,
     RewardConfig,
     RingCraftingEnvV1,
     reward_config_from_dict,
@@ -238,11 +239,13 @@ def make_env(
     seed: int,
     reward_config: RewardConfig | None = None,
     reward_profile: str | None = None,
+    goal: GoalSpec | None = None,
 ) -> RingCraftingEnvV1:
     env = RingCraftingEnvV1(
         engine,
         base_id=base_id,
         max_steps=max_steps,
+        goal=goal,
         reward_config=reward_config,
         reward_profile=reward_profile,
     )

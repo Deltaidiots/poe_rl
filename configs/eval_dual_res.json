@@ -1,0 +1,18 @@
+{
+  "model_path": "runs/ppo/viable_crafting_almost/checkpoints/ppo_ring_policy_300000_steps.zip",
+  "mods": "src/poe_rl/data/static/poec_data.json",
+  "episodes": 20,
+  "seed": 2025,
+  "max_steps": 240,
+  "deterministic": true,
+  "sample_count": 10,
+  "store_results": true,
+  "goal": {
+    "life_required_count": 1,
+    "life_max_tier": 5,
+    "res_required_count": 2,
+    "res_max_tier": 3,
+    "life_weight": 0.5,
+    "res_weight": 0.5
+  }
+}
