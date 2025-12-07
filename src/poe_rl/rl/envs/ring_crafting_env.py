@@ -118,21 +118,25 @@ NO_PROGRESS_EPS = 1e-4
 class RewardConfig:
     name: str = "default"
     shaping_coefficient: float = 2.0
-    success_bonus: float = 10.0
+    success_bonus: float = 20.0
     stop_fail_penalty: float = 1.0
-    cost_coefficient: float = 0.01
-    step_penalty: float = 0.01
-    impossible_state_penalty: float = 3.0
-    new_res_mod_reward: float = 2.0
-    res_tier_improvement_reward: float = 0.75
-    res_milestone_bonuses: Tuple[float, ...] = (1.0, 2.0, 3.0)
-    res_loss_penalty: float = 0.25
+    cost_coefficient: float = 0.005
+    step_penalty: float = 0.008
+    impossible_state_penalty: float = 4.0
+    new_res_mod_reward: float = 1.2
+    res_tier_improvement_reward: float = 0.85
+    res_milestone_bonuses: Tuple[float, ...] = (0.5, 1.0, 2.0)
+    res_loss_penalty: float = 0.35
     res_tier_loss_penalty: float = 0.1
     no_progress_penalty: float = 0.01
-    repeat_action_penalty: float = 0.01
+    repeat_action_penalty: float = 0.04
+    repeat_penalty_streak_threshold: int = 3
     unconsumed_omen_penalty: float = 0.5
     omen_consumption_bonus: float = 0.5
-    state_change_reward: float = 0.02
+    omen_progress_bonus: float = 0.6
+    essence_progress_bonus: float = 0.6
+    essence_first_mod_bonus: float = 0.4
+    state_change_reward: float = 0.0
 
 
 DEFAULT_REWARD_CONFIG = RewardConfig()
@@ -158,11 +162,30 @@ REPEAT_PENALTY_ACTIONS: Tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class ProgressStats:
+    prev_count: int
+    current_count: int
+    new_res_mods: int
+    lost_res_mods: int
+    tier_gain: float
+    tier_loss: float
+    milestone_bonus: float
+
+    @property
+    def made_positive_progress(self) -> bool:
+        return (self.new_res_mods > 0) or (self.tier_gain > 0.0) or (self.milestone_bonus > 0.0)
+
+    @property
+    def created_first_res_mod(self) -> bool:
+        return self.prev_count == 0 and self.current_count > 0
+
+
+@dataclass(frozen=True)
 class GoalSpec:
     life_required_count: int = 1
     life_max_tier: int = TIER_NORMALISER
     res_required_count: int = 2
-    res_max_tier: int = 2
+    res_max_tier: int = 3
     life_weight: float = 0.5
     res_weight: float = 0.5
 
@@ -233,6 +256,8 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         self._last_score = 0.0
         self._last_action_mask = np.ones(len(self._actions), dtype=np.int8)
         self._prev_action_name: Optional[str] = None
+        self._repeat_action_name: Optional[str] = None
+        self._repeat_action_count: int = 0
         self._used_omens: Set[str] = set()
 
     def _resolve_reward_config(
@@ -266,6 +291,7 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         self._steps = 0
         self._last_score = self._evaluate_goal(self._item).composite_score
         self._prev_action_name = None
+        self._reset_repeat_tracker()
         self._used_omens.clear()
         observation = self._encode_observation(self._item)
         self._last_action_mask = self._compute_action_mask(self._item)
@@ -291,6 +317,7 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
             observation = self._encode_observation(self._item)
             self._last_action_mask = np.zeros(len(self._actions), dtype=np.int8)
             self._prev_action_name = last_action_name
+            self._reset_repeat_tracker()
             info = {
                 "action_mask": self._last_action_mask.copy(),
                 "success": eval_result.success,
@@ -303,11 +330,13 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         # Guard against invalid actions (should be masked, but belt-and-braces)
         if not self._is_action_valid(action_spec.action, self._item, action_spec.name):
             reward = -cfg.stop_fail_penalty
+            repeat_count = self._update_repeat_tracker(last_action_name, made_progress=False)
             if (
-                self._prev_action_name == last_action_name
-                and last_action_name in REPEAT_PENALTY_ACTIONS
+                last_action_name in REPEAT_PENALTY_ACTIONS
+                and repeat_count >= cfg.repeat_penalty_streak_threshold
             ):
-                reward -= cfg.repeat_action_penalty
+                streak_excess = repeat_count - cfg.repeat_penalty_streak_threshold + 1
+                reward -= cfg.repeat_action_penalty * streak_excess
             observation = self._encode_observation(self._item)
             self._last_action_mask = self._compute_action_mask(self._item)
             self._prev_action_name = last_action_name
@@ -330,11 +359,13 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         except ValueError as exc:
             # Action failed due to unmet hidden condition
             reward = -cfg.stop_fail_penalty
+            repeat_count = self._update_repeat_tracker(last_action_name, made_progress=False)
             if (
-                self._prev_action_name == last_action_name
-                and last_action_name in REPEAT_PENALTY_ACTIONS
+                last_action_name in REPEAT_PENALTY_ACTIONS
+                and repeat_count >= cfg.repeat_penalty_streak_threshold
             ):
-                reward -= cfg.repeat_action_penalty
+                streak_excess = repeat_count - cfg.repeat_penalty_streak_threshold + 1
+                reward -= cfg.repeat_action_penalty * streak_excess
             observation = self._encode_observation(self._item)
             self._last_action_mask = self._compute_action_mask(self._item)
             self._prev_action_name = last_action_name
@@ -356,24 +387,34 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         shaping = cfg.shaping_coefficient * score_delta
         currency_penalty = cfg.cost_coefficient * float(cost)
         step_penalty = cfg.step_penalty
-        progress_reward = self._progress_shaping(prev_res_ids, prev_res_tiers, new_item)
+        progress_reward, progress_stats = self._progress_shaping(prev_res_ids, prev_res_tiers, new_item)
         state_changed = prev_state_sig != self._item_state_signature(new_item)
         consumed_omens = prev_active_omens - set(new_item.active_omens)
         omen_bonus = 0.0
-        if consumed_omens and abs(score_delta) > NO_PROGRESS_EPS:
+        if consumed_omens:
             omen_bonus = cfg.omen_consumption_bonus * len(consumed_omens)
-        reward = shaping + progress_reward + omen_bonus - currency_penalty - step_penalty
+            if progress_stats.made_positive_progress:
+                omen_bonus += cfg.omen_progress_bonus * len(consumed_omens)
+        essence_bonus = 0.0
+        if last_action_name in ESSENCE_ACTION_SEQUENCE:
+            if progress_stats.made_positive_progress:
+                essence_bonus += cfg.essence_progress_bonus
+            if progress_stats.created_first_res_mod:
+                essence_bonus += cfg.essence_first_mod_bonus
+        reward = shaping + progress_reward + omen_bonus + essence_bonus - currency_penalty - step_penalty
         if state_changed:
             reward += cfg.state_change_reward
-        made_progress = (abs(score_delta) >= NO_PROGRESS_EPS) or (progress_reward > 0.0)
+        made_progress = (abs(score_delta) >= NO_PROGRESS_EPS) or progress_stats.made_positive_progress
         if not made_progress:
             reward -= cfg.no_progress_penalty
+        repeat_count = self._update_repeat_tracker(last_action_name, made_progress)
         if (
-            self._prev_action_name == last_action_name
-            and last_action_name in REPEAT_PENALTY_ACTIONS
-            and score_delta <= NO_PROGRESS_EPS
+            last_action_name in REPEAT_PENALTY_ACTIONS
+            and not made_progress
+            and repeat_count >= cfg.repeat_penalty_streak_threshold
         ):
-            reward -= cfg.repeat_action_penalty
+            streak_excess = repeat_count - cfg.repeat_penalty_streak_threshold + 1
+            reward -= cfg.repeat_action_penalty * streak_excess
         terminated = False
         truncated = False
 
@@ -397,6 +438,7 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
             omen_count = len(new_item.active_omens)
             if omen_count:
                 reward -= cfg.unconsumed_omen_penalty * omen_count
+            self._reset_repeat_tracker()
         self._prev_action_name = last_action_name
         info = {
             "action_mask": self._last_action_mask.copy(),
@@ -419,6 +461,18 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         if not (0 <= action_idx < len(self._actions)):
             raise ValueError(f"Action index {action_idx} is out of bounds")
         return self._actions[action_idx].name
+
+    def _reset_repeat_tracker(self) -> None:
+        self._repeat_action_name = None
+        self._repeat_action_count = 0
+
+    def _update_repeat_tracker(self, action_name: str, made_progress: bool) -> int:
+        if made_progress or action_name != self._repeat_action_name:
+            self._repeat_action_name = action_name
+            self._repeat_action_count = 1
+        else:
+            self._repeat_action_count += 1
+        return self._repeat_action_count
 
     def set_base(self, base_id: str) -> None:
         if base_id not in self.engine.db.bases_by_id:
@@ -685,8 +739,8 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         prev_res_ids: Set[str],
         prev_res_tiers: Dict[str, float],
         item: Item,
-    ) -> float:
-        """Reward incremental progress events while penalising bricks."""
+    ) -> Tuple[float, ProgressStats]:
+        """Reward incremental progress events while capturing granular stats."""
 
         current_ids, current_tiers = self._res_mod_snapshot(item)
         cfg = self.reward_config
@@ -725,7 +779,16 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
                 milestone_bonus += bonus
         reward += milestone_bonus
 
-        return reward
+        stats = ProgressStats(
+            prev_count=prev_count,
+            current_count=current_count,
+            new_res_mods=new_res_mods,
+            lost_res_mods=lost_res_mods,
+            tier_gain=tier_gain,
+            tier_loss=tier_loss,
+            milestone_bonus=milestone_bonus,
+        )
+        return reward, stats
 
 
 def reward_config_to_dict(config: RewardConfig) -> Dict[str, Any]:
@@ -766,6 +829,7 @@ __all__ = [
     "RingCraftingEnvV1",
     "GoalSpec",
     "RewardConfig",
+    "ProgressStats",
     "reward_config_to_dict",
     "reward_config_from_dict",
 ]

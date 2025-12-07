@@ -438,6 +438,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         verbose=1,
         seed=args.seed,
+        ent_coef=0.01,
         tensorboard_log=None,
     )
     run_logger = _configure_run_logger(run_dir)
