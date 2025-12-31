@@ -1,7 +1,41 @@
+"""
+Gymnasium environment for PoE2 ring crafting with PPO/MaskablePPO.
+
+This environment simulates crafting a ring in Path of Exile 2, with the goal
+of achieving specific mod configurations (e.g., +Life and +Resistance mods).
+
+Key Features:
+------------
+- **Action Masking:** Invalid actions are masked to prevent impossible crafts
+- **99-Dimensional Observation:** Item state, mod groups, goal progress
+- **110 Discrete Actions:** Base currency, 81 essences, 11 omens, stop
+- **Configurable Rewards:** RewardConfig allows tuning shaping signals
+
+Environment Design:
+------------------
+- Observation includes: rarity, affix slots, mod group features, goal progress
+- Actions are validated before execution (action mask)
+- Episode ends when: goal achieved, max steps reached, or stop action
+- Reward combines: progress bonuses, tier improvements, cost penalties
+
+Usage Example:
+    from poe_rl.rl.envs.ring_crafting_env import RingCraftingEnvV1
+    from poe_rl.engine.core import CraftingEngine
+    from sb3_contrib import MaskablePPO
+
+    env = RingCraftingEnvV1(engine=engine)
+    model = MaskablePPO("MlpPolicy", env)
+    model.learn(total_timesteps=100000)
+
+See Also:
+    - docs/RL_JOURNEY.md for reward function evolution
+    - docs/ARCHITECTURE.md for system design
+"""
+
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import gymnasium as gym
@@ -69,21 +103,36 @@ BASE_ACTION_SEQUENCE: Tuple[str, ...] = (
     "Orb of Annulment",
 )
 
+# Static essence sequence for life/res goal - includes all tier variants
+# Use DYNAMIC_ESSENCE_ACTIONS=True to dynamically include all available essences
+DYNAMIC_ESSENCE_ACTIONS = True
+
 ESSENCE_ACTION_SEQUENCE: Tuple[str, ...] = (
-    "Essence of the Body",
+    # Life essences (Essence of the Body - all tiers)
     "Lesser Essence of the Body",
-    "Essence of Grounding",
-    "Essence of Insulation",
-    "Essence of Ruin",
-    "Essence of Thawing",
-    "Greater Essence of Grounding",
-    "Greater Essence of Insulation",
-    "Greater Essence of Ruin",
-    "Greater Essence of Thawing",
+    "Essence of the Body",
+    "Greater Essence of the Body",
+    "Perfect Essence of the Body",
+    # Resistance essences - Grounding (Lightning Res)
     "Lesser Essence of Grounding",
+    "Essence of Grounding",
+    "Greater Essence of Grounding",
+    "Perfect Essence of Grounding",
+    # Resistance essences - Insulation (Cold Res)
     "Lesser Essence of Insulation",
+    "Essence of Insulation",
+    "Greater Essence of Insulation",
+    "Perfect Essence of Insulation",
+    # Resistance essences - Ruin (Chaos Res)
     "Lesser Essence of Ruin",
+    "Essence of Ruin",
+    "Greater Essence of Ruin",
+    "Perfect Essence of Ruin",
+    # Resistance essences - Thawing (Fire Res)
     "Lesser Essence of Thawing",
+    "Essence of Thawing",
+    "Greater Essence of Thawing",
+    "Perfect Essence of Thawing",
 )
 
 OMEN_ACTION_SEQUENCE: Tuple[str, ...] = (
@@ -94,9 +143,65 @@ OMEN_ACTION_SEQUENCE: Tuple[str, ...] = (
     "Omen of Dextral Annulment",
     "Omen of Sinistral Annulment",
     "Omen of Greater Annulment",
+    "Omen of Dextral Crystallisation",
+    "Omen of Sinistral Crystallisation",
+    "Omen of Dextral Erasure",
+    "Omen of Sinistral Erasure",
 )
 
 STOP_ACTION_NAME = "Stop"
+
+CHAOS_ACTIONS: Tuple[str, ...] = (
+    "Chaos Orb",
+    "Greater Chaos Orb",
+    "Perfect Chaos Orb",
+)
+EXALTED_ACTIONS: Tuple[str, ...] = (
+    "Exalted Orb",
+    "Greater Exalted Orb",
+    "Perfect Exalted Orb",
+)
+REGAL_ACTIONS: Tuple[str, ...] = (
+    "Regal Orb",
+    "Greater Regal Orb",
+    "Perfect Regal Orb",
+)
+ANNULMENT_ACTIONS: Tuple[str, ...] = ("Orb of Annulment",)
+
+EXALTATION_OMENS: Set[str] = {
+    "Omen of Dextral Exaltation",
+    "Omen of Sinistral Exaltation",
+    "Omen of Greater Exaltation",
+    "Omen of Homogenising Exaltation",
+}
+REGAL_OMENS: Set[str] = {
+    "Omen of Dextral Coronation",
+    "Omen of Sinistral Coronation",
+    "Omen of Homogenising Coronation",
+}
+CHAOS_OMENS: Set[str] = {
+    "Omen of Dextral Erasure",
+    "Omen of Sinistral Erasure",
+    "Omen of Whittling",
+}
+ANNULMENT_OMENS: Set[str] = {
+    "Omen of Dextral Annulment",
+    "Omen of Sinistral Annulment",
+    "Omen of Greater Annulment",
+    "Omen of Light",
+}
+ESSENCE_KEYWORD = "Essence"
+
+SLOT_PHASE_RESET_ACTIONS: Set[str] = {
+    "Orb of Scouring",
+    "Orb of Transmutation",
+    "Orb of Augmentation",
+    "Orb of Alchemy",
+    "Orb of Chance",
+}
+SLOT_PHASE_RESET_ACTIONS.update(ANNULMENT_ACTIONS)
+SLOT_PHASE_RESET_ACTIONS.update(BASE_ACTION_SEQUENCE[:3])
+SLOT_PHASE_RESET_ACTIONS.update(ESSENCE_ACTION_SEQUENCE)
 
 # Observation layout sizing
 NUM_LIFE_GROUPS = len(LIFE_GROUPS)
@@ -112,6 +217,15 @@ OBSERVATION_SIZE = GLOBAL_FEATURES + GROUP_FEATURES + AGG_FEATURES + NUM_TAG_FEA
 VALUE_NORMALISER = 150.0
 TIER_NORMALISER = 5  # assume most mods have <= 6 tiers
 NO_PROGRESS_EPS = 1e-4
+
+
+@dataclass(frozen=True)
+class RewardChannelWeights:
+    general: float = 1.0
+    target_specific: float = 1.0
+    omen: float = 1.0
+    cost: float = 1.0
+    guardrail: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -134,9 +248,35 @@ class RewardConfig:
     unconsumed_omen_penalty: float = 0.5
     omen_consumption_bonus: float = 0.5
     omen_progress_bonus: float = 0.6
-    essence_progress_bonus: float = 0.6
-    essence_first_mod_bonus: float = 0.4
+    omen_timely_window: int = 5
+    omen_timely_consumption_bonus: float = 0.35
     state_change_reward: float = 0.0
+    early_rare_penalty: float = 0.6
+    deterministic_roll_bonus: float = 0.4
+    deterministic_cost_discount: float = 0.6
+    deterministic_bonus_max_streak: int = 2
+    family_cost_free_uses: int = 4
+    family_cost_ramp: float = 0.03
+    slot_congestion_grace_steps: int = 40
+    slot_congestion_penalty: float = 0.2
+    slot_congestion_growth: float = 0.02
+    slot_churn_threshold: int = 3
+    slot_churn_penalty: float = 0.15
+    structural_affix_gain_reward: float = 0.4
+    structural_affix_loss_penalty: float = 0.25
+    structural_quality_reward: float = 1.0
+    structural_quality_penalty: float = 0.6
+    structural_balance_penalty: float = 0.1
+    # Essence-specific incentives: reward guaranteed/targeted outcomes
+    essence_guaranteed_mod_bonus: float = 0.8  # bonus for using essence (guaranteed mod)
+    essence_goal_aligned_bonus: float = 1.2  # extra bonus if essence adds life/res
+    essence_early_use_bonus: float = 0.5  # bonus for using essence in first N steps
+    essence_early_use_window: int = 10  # steps within which early_use_bonus applies
+    # RNG exploitation penalties: discourage pure chaos spam
+    chaos_spam_threshold: int = 5  # start penalizing after this many chaos uses
+    chaos_spam_penalty_ramp: float = 0.05  # penalty per chaos use over threshold
+    rng_action_base_penalty: float = 0.02  # small per-use cost for purely RNG actions
+    channels: RewardChannelWeights = field(default_factory=RewardChannelWeights)
 
 
 DEFAULT_REWARD_CONFIG = RewardConfig()
@@ -150,14 +290,13 @@ REWARD_PROFILES: Dict[str, RewardConfig] = {
         res_loss_penalty=0.3,
     ),
 }
-REPEAT_PENALTY_ACTIONS: Tuple[str, ...] = (
-    "Chaos Orb",
-    "Greater Chaos Orb",
-    "Perfect Chaos Orb",
-    "Exalted Orb",
-    "Greater Exalted Orb",
-    "Perfect Exalted Orb",
-    *OMEN_ACTION_SEQUENCE,
+REPEAT_PENALTY_FAMILIES: Tuple[str, ...] = (
+    "chaos",
+    "exalt",
+    "annul",
+    "regal",
+    "essence",
+    "omen",
 )
 
 
@@ -223,6 +362,13 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
     """Gymnasium-compatible environment for the v1 PoE2 ring crafting PPO spec."""
 
     metadata = {"render_modes": ["human"], "render_fps": 4}
+    _REWARD_COMPONENT_KEYS: Tuple[str, ...] = (
+        "general",
+        "target_specific",
+        "omen",
+        "cost",
+        "guardrail",
+    )
 
     def __init__(
         self,
@@ -256,9 +402,18 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         self._last_score = 0.0
         self._last_action_mask = np.ones(len(self._actions), dtype=np.int8)
         self._prev_action_name: Optional[str] = None
-        self._repeat_action_name: Optional[str] = None
-        self._repeat_action_count: int = 0
         self._used_omens: Set[str] = set()
+        self._made_progress: bool = False
+        self._active_omen_steps: Dict[str, int] = {}
+        self._omens_applied_total = 0
+        self._omens_consumed_total = 0
+        self._repeat_family: Optional[str] = None
+        self._repeat_family_count: int = 0
+        self._family_use_counts: Dict[str, int] = {}
+        self._deterministic_streak = 0
+        self._affix_congestion_steps: Dict[str, int] = {"prefix": 0, "suffix": 0}
+        self._affix_churn_scores: Dict[str, int] = {"prefix": 0, "suffix": 0}
+        self._last_affix_counts: Dict[str, int] = {"prefix": 0, "suffix": 0}
 
     def _resolve_reward_config(
         self,
@@ -293,6 +448,15 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         self._prev_action_name = None
         self._reset_repeat_tracker()
         self._used_omens.clear()
+        self._made_progress = False
+        self._active_omen_steps.clear()
+        self._omens_applied_total = 0
+        self._omens_consumed_total = 0
+        self._family_use_counts.clear()
+        self._deterministic_streak = 0
+        self._affix_congestion_steps = {"prefix": 0, "suffix": 0}
+        self._affix_churn_scores = {"prefix": 0, "suffix": 0}
+        self._last_affix_counts = {"prefix": 0, "suffix": 0}
         observation = self._encode_observation(self._item)
         self._last_action_mask = self._compute_action_mask(self._item)
         info = {"action_mask": self._last_action_mask.copy()}
@@ -304,42 +468,50 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         assert self._item is not None, "Environment must be reset before stepping"
         action_spec = self._actions[action_idx]
         last_action_name = action_spec.name
+        action_family = self._action_family(last_action_name)
 
         # Handle Stop action explicitly
         cfg = self.reward_config
+        components = self._init_reward_components()
         if action_spec.name == STOP_ACTION_NAME:
             eval_result = self._evaluate_goal(self._item)
-            reward = cfg.success_bonus if eval_result.success else -cfg.stop_fail_penalty
-            if self._item.active_omens:
-                reward -= cfg.unconsumed_omen_penalty * len(self._item.active_omens)
+            if eval_result.success:
+                components["general"] += cfg.success_bonus
+            else:
+                components["guardrail"] -= cfg.stop_fail_penalty
+            self._apply_unused_omen_penalty(components)
             terminated = True
             truncated = False
             observation = self._encode_observation(self._item)
             self._last_action_mask = np.zeros(len(self._actions), dtype=np.int8)
             self._prev_action_name = last_action_name
             self._reset_repeat_tracker()
+            reward = self._combine_reward_components(components)
             info = {
                 "action_mask": self._last_action_mask.copy(),
                 "success": eval_result.success,
                 "score": eval_result.composite_score,
                 "cost": 0.0,
                 "last_action_name": last_action_name,
+                "omen_consumption_rate": self._omen_consumption_rate(),
+                "reward_components": components.copy(),
             }
             return observation, reward, terminated, truncated, info
 
         # Guard against invalid actions (should be masked, but belt-and-braces)
         if not self._is_action_valid(action_spec.action, self._item, action_spec.name):
-            reward = -cfg.stop_fail_penalty
-            repeat_count = self._update_repeat_tracker(last_action_name, made_progress=False)
+            components["guardrail"] -= cfg.stop_fail_penalty
+            repeat_count = self._update_repeat_tracker(action_family, made_progress=False)
             if (
-                last_action_name in REPEAT_PENALTY_ACTIONS
+                action_family in REPEAT_PENALTY_FAMILIES
                 and repeat_count >= cfg.repeat_penalty_streak_threshold
             ):
                 streak_excess = repeat_count - cfg.repeat_penalty_streak_threshold + 1
-                reward -= cfg.repeat_action_penalty * streak_excess
+                components["guardrail"] -= cfg.repeat_action_penalty * streak_excess
             observation = self._encode_observation(self._item)
             self._last_action_mask = self._compute_action_mask(self._item)
             self._prev_action_name = last_action_name
+            reward = self._combine_reward_components(components)
             info = {
                 "action_mask": self._last_action_mask.copy(),
                 "invalid_action": True,
@@ -347,28 +519,36 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
                 "success": False,
                 "score": self._last_score,
                 "last_action_name": last_action_name,
+                "reward_components": components.copy(),
             }
             return observation, reward, False, False, info
 
         prev_state_sig = self._item_state_signature(self._item)
+        prev_rarity = self._item.rarity
         prev_res_ids, prev_res_tiers = self._res_mod_snapshot(self._item)
         prev_active_omens = set(self._item.active_omens)
+        prev_affix_counts = {
+            "prefix": self._item.num_prefixes,
+            "suffix": self._item.num_suffixes,
+        }
+        prev_structure_quality = self._structure_quality_score(self._item)
 
         try:
             new_item, cost = self.engine.apply(self._item, action_spec.action)
         except ValueError as exc:
             # Action failed due to unmet hidden condition
-            reward = -cfg.stop_fail_penalty
-            repeat_count = self._update_repeat_tracker(last_action_name, made_progress=False)
+            components["guardrail"] -= cfg.stop_fail_penalty
+            repeat_count = self._update_repeat_tracker(action_family, made_progress=False)
             if (
-                last_action_name in REPEAT_PENALTY_ACTIONS
+                action_family in REPEAT_PENALTY_FAMILIES
                 and repeat_count >= cfg.repeat_penalty_streak_threshold
             ):
                 streak_excess = repeat_count - cfg.repeat_penalty_streak_threshold + 1
-                reward -= cfg.repeat_action_penalty * streak_excess
+                components["guardrail"] -= cfg.repeat_action_penalty * streak_excess
             observation = self._encode_observation(self._item)
             self._last_action_mask = self._compute_action_mask(self._item)
             self._prev_action_name = last_action_name
+            reward = self._combine_reward_components(components)
             info = {
                 "action_mask": self._last_action_mask.copy(),
                 "invalid_action": True,
@@ -377,6 +557,7 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
                 "success": False,
                 "score": self._last_score,
                 "last_action_name": last_action_name,
+                "reward_components": components.copy(),
             }
             return observation, reward, False, False, info
 
@@ -385,44 +566,104 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         new_score = eval_result.composite_score
         score_delta = new_score - self._last_score
         shaping = cfg.shaping_coefficient * score_delta
-        currency_penalty = cfg.cost_coefficient * float(cost)
+        family_use_count = self._family_use_counts.get(action_family, 0)
+        deterministic_roll = self._is_deterministic_roll(last_action_name, prev_active_omens)
+        if deterministic_roll:
+            self._deterministic_streak += 1
+        else:
+            self._deterministic_streak = 0
+        deterministic_bonus_allowed = (
+            deterministic_roll and self._deterministic_streak <= cfg.deterministic_bonus_max_streak
+        )
+        cost_multiplier = self._cost_multiplier(
+            last_action_name,
+            action_family,
+            family_use_count,
+            deterministic_bonus_allowed,
+            deterministic_roll,
+        )
+        currency_penalty = cfg.cost_coefficient * float(cost) * cost_multiplier
         step_penalty = cfg.step_penalty
         progress_reward, progress_stats = self._progress_shaping(prev_res_ids, prev_res_tiers, new_item)
+        new_affix_counts = {
+            "prefix": new_item.num_prefixes,
+            "suffix": new_item.num_suffixes,
+        }
+        new_structure_quality = self._structure_quality_score(new_item)
+        structural_reward = self._structural_progress_reward(
+            prev_affix_counts,
+            new_affix_counts,
+            prev_structure_quality,
+            new_structure_quality,
+        )
         state_changed = prev_state_sig != self._item_state_signature(new_item)
-        consumed_omens = prev_active_omens - set(new_item.active_omens)
-        omen_bonus = 0.0
-        if consumed_omens:
-            omen_bonus = cfg.omen_consumption_bonus * len(consumed_omens)
+        current_active_omens = set(new_item.active_omens)
+        consumed_omens = prev_active_omens - current_active_omens
+        applied_omens = current_active_omens - prev_active_omens
+        if applied_omens:
+            self._track_omen_applications(applied_omens)
+        omen_bonus = self._compute_omen_bonus(consumed_omens, progress_stats)
+        components["general"] += shaping + structural_reward
+        if deterministic_bonus_allowed:
+            components["general"] += cfg.deterministic_roll_bonus
+        components["target_specific"] += progress_reward
+        components["omen"] += omen_bonus
+        components["cost"] -= currency_penalty + step_penalty
+        
+        # Essence incentives: reward guaranteed/targeted outcomes
+        is_essence_action = ESSENCE_KEYWORD in last_action_name
+        if is_essence_action:
+            # Base bonus for using essence (guaranteed mod outcome)
+            components["general"] += cfg.essence_guaranteed_mod_bonus
+            # Extra bonus if used early in episode (encourages strategic planning)
+            if self._steps <= cfg.essence_early_use_window:
+                components["general"] += cfg.essence_early_use_bonus
+            # Extra bonus if essence contributes to goal (life/res)
             if progress_stats.made_positive_progress:
-                omen_bonus += cfg.omen_progress_bonus * len(consumed_omens)
-        essence_bonus = 0.0
-        if last_action_name in ESSENCE_ACTION_SEQUENCE:
-            if progress_stats.made_positive_progress:
-                essence_bonus += cfg.essence_progress_bonus
-            if progress_stats.created_first_res_mod:
-                essence_bonus += cfg.essence_first_mod_bonus
-        reward = shaping + progress_reward + omen_bonus + essence_bonus - currency_penalty - step_penalty
+                components["target_specific"] += cfg.essence_goal_aligned_bonus
+        
+        # Chaos spam penalty: discourage pure RNG exploitation
+        if action_family == "chaos":
+            chaos_uses = self._family_use_counts.get("chaos", 0) + 1
+            if chaos_uses > cfg.chaos_spam_threshold:
+                excess = chaos_uses - cfg.chaos_spam_threshold
+                components["guardrail"] -= cfg.chaos_spam_penalty_ramp * excess
+            # Small base penalty for purely RNG actions (incentivize deterministic alternatives)
+            if not deterministic_roll:
+                components["cost"] -= cfg.rng_action_base_penalty
+        
         if state_changed:
-            reward += cfg.state_change_reward
+            components["general"] += cfg.state_change_reward
         made_progress = (abs(score_delta) >= NO_PROGRESS_EPS) or progress_stats.made_positive_progress
-        if not made_progress:
-            reward -= cfg.no_progress_penalty
-        repeat_count = self._update_repeat_tracker(last_action_name, made_progress)
+        if made_progress:
+            self._made_progress = True
+        else:
+            components["guardrail"] -= cfg.no_progress_penalty
+        repeat_count = self._update_repeat_tracker(action_family, made_progress)
         if (
-            last_action_name in REPEAT_PENALTY_ACTIONS
+            action_family in REPEAT_PENALTY_FAMILIES
             and not made_progress
             and repeat_count >= cfg.repeat_penalty_streak_threshold
         ):
             streak_excess = repeat_count - cfg.repeat_penalty_streak_threshold + 1
-            reward -= cfg.repeat_action_penalty * streak_excess
+            components["guardrail"] -= cfg.repeat_action_penalty * streak_excess
+        self._family_use_counts[action_family] = family_use_count + 1
+
+        if (
+            prev_rarity != "Rare"
+            and new_item.rarity == "Rare"
+            and not self._made_progress
+        ):
+            components["guardrail"] -= cfg.early_rare_penalty
+        self._apply_slot_efficiency_penalty(new_item, last_action_name, components)
         terminated = False
         truncated = False
 
         if eval_result.success:
-            reward += cfg.success_bonus
+            components["general"] += cfg.success_bonus
             terminated = True
         elif self._is_impossible_state(new_item, eval_result):
-            reward -= cfg.impossible_state_penalty
+            components["guardrail"] -= cfg.impossible_state_penalty
             truncated = True
         elif self._steps >= self.max_steps:
             truncated = True
@@ -435,10 +676,9 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         observation = self._encode_observation(new_item)
         self._last_action_mask = self._compute_action_mask(new_item)
         if terminated or truncated:
-            omen_count = len(new_item.active_omens)
-            if omen_count:
-                reward -= cfg.unconsumed_omen_penalty * omen_count
+            self._apply_unused_omen_penalty(components, active_count=len(new_item.active_omens))
             self._reset_repeat_tracker()
+        reward = self._combine_reward_components(components)
         self._prev_action_name = last_action_name
         info = {
             "action_mask": self._last_action_mask.copy(),
@@ -447,6 +687,8 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
             "cost": cost,
             "last_action_name": last_action_name,
             "omens_consumed": len(consumed_omens),
+            "omen_consumption_rate": self._omen_consumption_rate(),
+            "reward_components": components.copy(),
         }
         return observation, reward, terminated, truncated, info
 
@@ -463,16 +705,16 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         return self._actions[action_idx].name
 
     def _reset_repeat_tracker(self) -> None:
-        self._repeat_action_name = None
-        self._repeat_action_count = 0
+        self._repeat_family = None
+        self._repeat_family_count = 0
 
-    def _update_repeat_tracker(self, action_name: str, made_progress: bool) -> int:
-        if made_progress or action_name != self._repeat_action_name:
-            self._repeat_action_name = action_name
-            self._repeat_action_count = 1
+    def _update_repeat_tracker(self, action_family: str, made_progress: bool) -> int:
+        if made_progress or action_family != self._repeat_family:
+            self._repeat_family = action_family
+            self._repeat_family_count = 1
         else:
-            self._repeat_action_count += 1
-        return self._repeat_action_count
+            self._repeat_family_count += 1
+        return self._repeat_family_count
 
     def set_base(self, base_id: str) -> None:
         if base_id not in self.engine.db.bases_by_id:
@@ -490,9 +732,18 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
     def _build_actions(self) -> List[ActionSpec]:
         action_lookup = {action.name: action for action in ACTIONS}
         essence_lookup = {a.name: a for a in create_essence_actions(self.engine.db)}
+        
+        # Determine essence sequence: either static or dynamic from database
+        if DYNAMIC_ESSENCE_ACTIONS:
+            # Include all available essences from the engine's database
+            essence_names = sorted(essence_lookup.keys())
+        else:
+            # Use the static sequence (for backward compatibility)
+            essence_names = list(ESSENCE_ACTION_SEQUENCE)
+        
         ordered_names: List[str] = [
             *BASE_ACTION_SEQUENCE,
-            *ESSENCE_ACTION_SEQUENCE,
+            *essence_names,
             *OMEN_ACTION_SEQUENCE,
             STOP_ACTION_NAME,
         ]
@@ -500,9 +751,25 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         for name in ordered_names:
             action = action_lookup.get(name) or essence_lookup.get(name)
             if action is None:
+                # Skip missing actions in dynamic mode, raise in static mode
+                if DYNAMIC_ESSENCE_ACTIONS and name in essence_names:
+                    continue  # Essence not available for this item class
                 raise KeyError(f"Crafting action '{name}' is not available in the current database")
             action_specs.append(ActionSpec(name=name, action=action))
         return action_specs
+
+    def _init_reward_components(self) -> Dict[str, float]:
+        return {key: 0.0 for key in self._REWARD_COMPONENT_KEYS}
+
+    def _combine_reward_components(self, components: Mapping[str, float]) -> float:
+        channels = self.reward_config.channels
+        return (
+            channels.general * components["general"]
+            + channels.target_specific * components["target_specific"]
+            + channels.omen * components["omen"]
+            + channels.cost * components["cost"]
+            + channels.guardrail * components["guardrail"]
+        )
 
     def _compute_action_mask(self, item: Item) -> np.ndarray:
         mask = np.zeros(len(self._actions), dtype=np.int8)
@@ -512,6 +779,144 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
             elif self._is_action_valid(spec.action, item, spec.name):
                 mask[idx] = 1
         return mask
+
+    def _action_family(self, action_name: str) -> str:
+        if action_name == STOP_ACTION_NAME:
+            return "stop"
+        if action_name in CHAOS_ACTIONS:
+            return "chaos"
+        if action_name in EXALTED_ACTIONS:
+            return "exalt"
+        if action_name in ANNULMENT_ACTIONS:
+            return "annul"
+        if action_name in REGAL_ACTIONS:
+            return "regal"
+        if action_name in OMEN_ACTION_SEQUENCE or action_name.startswith("Omen"):
+            return "omen"
+        if ESSENCE_KEYWORD in action_name:
+            return "essence"
+        if "Alchemy" in action_name:
+            return "alchemy"
+        if "Augmentation" in action_name or "Transmutation" in action_name:
+            return "magic_upgrade"
+        if "Scouring" in action_name or "Chance" in action_name:
+            return "reset"
+        return action_name.lower()
+
+    def _track_omen_applications(self, applied: Set[str]) -> None:
+        for omen in applied:
+            self._active_omen_steps[omen] = self._steps
+            self._omens_applied_total += 1
+
+    def _compute_omen_bonus(self, consumed: Set[str], progress_stats: ProgressStats) -> float:
+        if not consumed:
+            return 0.0
+        cfg = self.reward_config
+        bonus = cfg.omen_consumption_bonus * len(consumed)
+        if progress_stats.made_positive_progress:
+            bonus += cfg.omen_progress_bonus * len(consumed)
+        for omen in consumed:
+            self._omens_consumed_total += 1
+            applied_step = self._active_omen_steps.pop(omen, None)
+            if applied_step is None:
+                continue
+            lag = max(1, self._steps - applied_step)
+            if lag <= cfg.omen_timely_window:
+                bonus += cfg.omen_timely_consumption_bonus
+        return bonus
+
+    def _apply_unused_omen_penalty(
+        self,
+        components: Dict[str, float],
+        *,
+        active_count: Optional[int] = None,
+    ) -> None:
+        cfg = self.reward_config
+        if active_count is None:
+            active_count = len(self._item.active_omens) if self._item else 0
+        total_applied = self._omens_applied_total
+        if total_applied <= 0:
+            if active_count > 0:
+                components["omen"] -= cfg.unconsumed_omen_penalty * active_count
+            return
+        unused = max(total_applied - self._omens_consumed_total, active_count)
+        if unused <= 0:
+            return
+        unused_fraction = unused / total_applied
+        components["omen"] -= cfg.unconsumed_omen_penalty * unused_fraction
+
+    def _omen_consumption_rate(self) -> float:
+        if self._omens_applied_total == 0:
+            return 0.0
+        return self._omens_consumed_total / self._omens_applied_total
+
+    def _is_deterministic_roll(self, action_name: str, prev_active_omens: Set[str]) -> bool:
+        if ESSENCE_KEYWORD in action_name:
+            return True
+        if action_name in EXALTED_ACTIONS and prev_active_omens & EXALTATION_OMENS:
+            return True
+        if action_name in REGAL_ACTIONS and prev_active_omens & REGAL_OMENS:
+            return True
+        if action_name in CHAOS_ACTIONS and prev_active_omens & CHAOS_OMENS:
+            return True
+        if action_name in ANNULMENT_ACTIONS and prev_active_omens & ANNULMENT_OMENS:
+            return True
+        return False
+
+    def _cost_multiplier(
+        self,
+        action_name: str,
+        action_family: str,
+        family_use_count: int,
+        deterministic_discount_allowed: bool,
+        deterministic_roll: bool,
+    ) -> float:
+        cfg = self.reward_config
+        multiplier = 1.0
+        if deterministic_roll and deterministic_discount_allowed:
+            multiplier *= cfg.deterministic_cost_discount
+        free_uses = max(0, cfg.family_cost_free_uses)
+        if family_use_count >= free_uses:
+            # family_use_count reflects prior uses; include current action in the surcharge
+            overage = family_use_count - free_uses + 1
+            multiplier *= 1.0 + max(0.0, cfg.family_cost_ramp) * overage
+        return multiplier
+
+    def _apply_slot_efficiency_penalty(
+        self,
+        item: Item,
+        action_name: str,
+        components: Dict[str, float],
+    ) -> None:
+        cfg = self.reward_config
+        resets_affixes = action_name in SLOT_PHASE_RESET_ACTIONS or ESSENCE_KEYWORD in action_name
+        counts = {
+            "prefix": item.num_prefixes,
+            "suffix": item.num_suffixes,
+        }
+        for kind, count in counts.items():
+            max_slots = 3
+            if resets_affixes:
+                self._affix_congestion_steps[kind] = 0
+            if count < max_slots:
+                self._affix_congestion_steps[kind] = 0
+            else:
+                self._affix_congestion_steps[kind] += 1
+                if self._affix_congestion_steps[kind] > cfg.slot_congestion_grace_steps:
+                    excess = self._affix_congestion_steps[kind] - cfg.slot_congestion_grace_steps
+                    growth = 1.0 + (cfg.slot_congestion_growth * excess)
+                    penalty = cfg.slot_congestion_penalty * growth
+                    components["guardrail"] -= penalty
+
+            prev_count = self._last_affix_counts[kind]
+            if count == max_slots and prev_count < max_slots:
+                self._affix_churn_scores[kind] += 1
+                if self._affix_churn_scores[kind] >= cfg.slot_churn_threshold:
+                    churn_penalty = cfg.slot_churn_penalty * self._affix_churn_scores[kind]
+                    components["guardrail"] -= churn_penalty
+            else:
+                self._affix_churn_scores[kind] = max(0, self._affix_churn_scores[kind] - 1)
+            self._last_affix_counts[kind] = count
 
     def _is_action_valid(
         self,
@@ -696,6 +1101,19 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
             return 0.0
         return min(total / 3.0, 1.0)
 
+    def _structure_quality_score(self, item: Item) -> float:
+        total = 0.0
+        count = 0
+        for mod_id in item.prefix_ids + item.suffix_ids:
+            mod = self.engine.db.mods_by_id.get(mod_id)
+            if mod is None:
+                continue
+            total += self._normalise_tier(self._resolve_mod_tier(mod))
+            count += 1
+        if count == 0:
+            return 0.0
+        return total / count
+
     def _has_fractured_priority_mod(self, item: Item) -> bool:
         for mod_id in item.fractured_mods:
             mod = self.engine.db.mods_by_id.get(mod_id)
@@ -790,6 +1208,35 @@ class RingCraftingEnvV1(gym.Env[np.ndarray, int]):
         )
         return reward, stats
 
+    def _structural_progress_reward(
+        self,
+        prev_affix_counts: Mapping[str, int],
+        new_affix_counts: Mapping[str, int],
+        prev_quality: float,
+        new_quality: float,
+    ) -> float:
+        cfg = self.reward_config
+        reward = 0.0
+        prev_total = prev_affix_counts["prefix"] + prev_affix_counts["suffix"]
+        new_total = new_affix_counts["prefix"] + new_affix_counts["suffix"]
+        delta = new_total - prev_total
+        if delta > 0:
+            reward += cfg.structural_affix_gain_reward * delta
+        elif delta < 0:
+            reward -= cfg.structural_affix_loss_penalty * (-delta)
+
+        quality_delta = new_quality - prev_quality
+        if quality_delta > 0:
+            reward += cfg.structural_quality_reward * quality_delta
+        elif quality_delta < 0:
+            reward -= cfg.structural_quality_penalty * (-quality_delta)
+
+        prev_balance = abs(prev_affix_counts["prefix"] - prev_affix_counts["suffix"])
+        new_balance = abs(new_affix_counts["prefix"] - new_affix_counts["suffix"])
+        if new_balance > prev_balance:
+            reward -= cfg.structural_balance_penalty * (new_balance - prev_balance)
+        return reward
+
 
 def reward_config_to_dict(config: RewardConfig) -> Dict[str, Any]:
     data = asdict(config)
@@ -804,6 +1251,8 @@ def reward_config_from_dict(payload: Mapping[str, Any]) -> RewardConfig:
             continue
         if key == "res_milestone_bonuses":
             value = tuple(value)
+        if key == "channels" and isinstance(value, Mapping):
+            value = RewardChannelWeights(**value)
         kwargs[key] = value
     return RewardConfig(**kwargs)
 
@@ -828,6 +1277,7 @@ def reward_config_from_dict(payload: Mapping[str, Any]) -> RewardConfig:
 __all__ = [
     "RingCraftingEnvV1",
     "GoalSpec",
+    "RewardChannelWeights",
     "RewardConfig",
     "ProgressStats",
     "reward_config_to_dict",

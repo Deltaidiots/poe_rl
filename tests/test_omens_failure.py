@@ -2,8 +2,8 @@ import random
 import unittest
 from unittest.mock import MagicMock
 
-from src.poe_rl.data.models import Essence, Item, ItemBase, Mod
-from src.poe_rl.engine.actions import ACTIONS, AddRandomMod, DivineEffect, EssenceEffect, RemoveRandomMod
+from poe_rl.data.models import Essence, Item, ItemBase, Mod
+from poe_rl.engine.actions import ACTIONS, AddRandomMod, DivineEffect, EssenceEffect, RemoveRandomMod
 
 
 class TestOmenInteractions(unittest.TestCase):

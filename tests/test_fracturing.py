@@ -2,8 +2,8 @@ import random
 import unittest
 from unittest.mock import MagicMock
 
-from src.poe_rl.data.models import Item, ItemBase, Mod
-from src.poe_rl.engine.actions import (
+from poe_rl.data.models import Item, ItemBase, Mod
+from poe_rl.engine.actions import (
     FRACTURE_EXISTS_MESSAGE,
     FRACTURE_MINIMUM_MESSAGE,
     FractureEffect,

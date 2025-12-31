@@ -1,3 +1,38 @@
+"""
+Crafting actions for PoE2 ring crafting simulation.
+
+This module defines all currency, essence, and omen actions available in the
+crafting system. Actions are composed of:
+- **Requirements:** Predicates that must be satisfied for the action to be valid
+- **Effects:** Mutations applied to the item when the action executes
+
+Key Components:
+--------------
+- `CraftingAction`: Main action container with name, requirements, effects, and cost
+- `ACTIONS`: List of all base currency/omen actions
+- `create_essence_actions()`: Factory for essence actions from database
+
+Effect Classes:
+--------------
+- `AddRandomMod`: Add a random prefix or suffix
+- `ChaosRerollEffect`: Reroll all mods on a rare item
+- `EssenceEffect`: Apply essence with guaranteed mod
+- `SetOmen`: Apply an omen effect to the item
+- `FractureEffect`: Fracture a random mod (cannot be removed)
+- etc.
+
+Usage Example:
+    from poe_rl.engine.actions import ACTIONS, get_action_by_name
+
+    chaos_action = get_action_by_name("Chaos Orb")
+    if all(req(item, db) for req in chaos_action.requirements):
+        item = chaos_action.apply(item, db, rng)
+
+See Also:
+    - docs/ARCHITECTURE.md for system design
+    - docs/DATA_MODEL.md for mod ID conventions
+"""
+
 from __future__ import annotations
 
 import random

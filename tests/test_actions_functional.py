@@ -2,15 +2,15 @@ import random
 import unittest
 from typing import cast
 
-from src.poe_rl.data.models import Essence, Item, ItemBase, Mod
-from src.poe_rl.engine.actions import (
+from poe_rl.data.models import Essence, Item, ItemBase, Mod
+from poe_rl.engine.actions import (
     ACTIONS,
     CraftingAction,
     SetOmen,
     create_essence_actions,
     get_action_by_name,
 )
-from src.poe_rl.engine.database import CraftingDatabase
+from poe_rl.engine.database import CraftingDatabase
 
 
 def _make_mod(
