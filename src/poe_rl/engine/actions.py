@@ -687,6 +687,77 @@ class ChaosOrbEffect:
 class EssenceEffect:
     essence_id: str
     
+    def _resolve_guaranteed_mod(
+        self,
+        base_mod_id: str,
+        item_class: str,
+        db: CraftingDatabase,
+        essence_name: str,
+    ) -> Optional[Tuple[str, Mod]]:
+        """
+        Resolve the guaranteed mod ID from the essence data to an actual mod in the database.
+        
+        The essence's guaranteed_mods contains base mod IDs like '5039', but the database
+        keys are composite like '5039_Ring_1' (base_id + item_class + tier).
+        
+        Tier selection based on essence type:
+        - Perfect/Corrupted: Best tier (tier 1)
+        - Greater: Mid-high tier (tier 2-3)
+        - Normal (no prefix): Mid tier
+        - Lesser: Lower tier
+        """
+        # First try direct lookup (in case the ID already includes class/tier)
+        if base_mod_id in db.mods_by_id:
+            mod = db.mods_by_id[base_mod_id]
+            return (base_mod_id, mod)
+        
+        # Find all mods matching the base ID prefix for this item class
+        # Pattern: {base_mod_id}_{ItemClass}_{tier}
+        prefix = f"{base_mod_id}_"
+        candidates: List[Tuple[str, Mod]] = []
+        for mod_id, mod in db.mods_by_id.items():
+            if mod_id.startswith(prefix):
+                # Check if this mod applies to rings (or the relevant item class)
+                if any(cls.lower() == item_class.lower() for cls in mod.item_classes):
+                    candidates.append((mod_id, mod))
+                # Also match by item_class name in the mod_id (e.g., "5039_Ring_1")
+                elif f"_{item_class}_" in mod_id or mod_id.endswith(f"_{item_class}"):
+                    candidates.append((mod_id, mod))
+        
+        if not candidates:
+            # Try looser match - just prefix
+            for mod_id, mod in db.mods_by_id.items():
+                if mod_id.startswith(prefix):
+                    candidates.append((mod_id, mod))
+        
+        if not candidates:
+            return None
+        
+        # Sort by tier (lower tier number = better)
+        candidates.sort(key=lambda x: x[1].tier if x[1].tier is not None else 999)
+        
+        # Select tier based on essence type
+        is_perfect = "Perfect" in essence_name
+        is_corrupted = essence_name in CORRUPTED_ESSENCE_NAMES
+        is_greater = "Greater" in essence_name
+        is_lesser = "Lesser" in essence_name
+        
+        if is_perfect or is_corrupted:
+            # Best tier (first after sorting = lowest tier number)
+            return candidates[0]
+        elif is_greater:
+            # Mid-high tier (second best if available)
+            idx = min(1, len(candidates) - 1)
+            return candidates[idx]
+        elif is_lesser:
+            # Lower tier (towards end)
+            idx = max(0, len(candidates) - 2)
+            return candidates[idx]
+        else:
+            # Normal essence - mid tier
+            idx = len(candidates) // 2
+            return candidates[idx]
+    
     def apply(self, item: Item, db: CraftingDatabase, rng: random.Random) -> None:
         if not db.essences_by_id:
             raise ValueError(ESSENCE_UNSUPPORTED_MESSAGE)
@@ -698,18 +769,33 @@ class EssenceEffect:
         is_perfect = "Perfect" in essence.name
         is_corrupted = essence.name in CORRUPTED_ESSENCE_NAMES
         
-        # Determine Guaranteed Mod
-        guaranteed_mods = essence.guaranteed_mods.get(item.base.item_class)
-        guaranteed_mod_id = None
-        if guaranteed_mods:
-            guaranteed_mod_id = guaranteed_mods[0] # Assume first
+        # Determine Guaranteed Mod - use item_class_id from the base if available
+        # The essence stores guaranteed_mods keyed by item class ID (e.g., "1" for Ring)
+        item_class_key = item.base.item_class_id or item.base.item_class
+        guaranteed_mods = essence.guaranteed_mods.get(item_class_key)
         
-        if not guaranteed_mod_id:
+        # Fallback: try the item_class name if ID lookup failed
+        if not guaranteed_mods and item.base.item_class_id:
+            guaranteed_mods = essence.guaranteed_mods.get(item.base.item_class)
+        
+        base_mod_id = None
+        if guaranteed_mods:
+            base_mod_id = guaranteed_mods[0]  # Assume first
+        
+        if not base_mod_id:
             raise ValueError(ESSENCE_UNSUPPORTED_MESSAGE)
-            
-        guaranteed_mod = db.mods_by_id.get(guaranteed_mod_id)
-        if not guaranteed_mod:
+        
+        # Resolve the base mod ID to an actual mod in the database
+        resolved = self._resolve_guaranteed_mod(
+            base_mod_id, 
+            item.base.item_class,
+            db,
+            essence.name,
+        )
+        if not resolved:
             raise ValueError(ESSENCE_UNSUPPORTED_MESSAGE)
+        
+        guaranteed_mod_id, guaranteed_mod = resolved
 
         original_prefixes = list(item.prefix_ids)
         original_suffixes = list(item.suffix_ids)
